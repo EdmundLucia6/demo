@@ -1,51 +1,60 @@
 #include <iostream>
-#include <sys/socket.h>
-#include <sys/un.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <dlfcn.h>
+#include <cstring>
 #include <unistd.h>
 
-const char* SOCKET_PATH = "/tmp/callback_socket";
-
-void handle_client(int client_socket) {
-    char buffer[256] = {0};
-    // 读取客户端发送的消息
-    read(client_socket, buffer, sizeof(buffer));
-    std::cout << "Server received: " << buffer << std::endl;
-
-    // 模拟事件触发，回调
-    std::string response = "Event occurred. Callback triggered.";
-    write(client_socket, response.c_str(), response.size());
-}
+const int SHM_SIZE = 256;
 
 int main() {
-    int server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server_socket < 0) {
-        perror("Socket creation failed");
+    // 创建共享内存
+    key_t key = ftok("shmfile", 65);
+    int shmid = shmget(key, SHM_SIZE, 0666 | IPC_CREAT);
+    if (shmid == -1) {
+        perror("Shared memory creation failed");
         return 1;
     }
 
-    struct sockaddr_un server_addr;
-    server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
-    unlink(SOCKET_PATH);
-
-    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Bind failed");
+    // 连接到共享内存
+    char* shared_memory = (char*)shmat(shmid, nullptr, 0);
+    if (shared_memory == (char*)-1) {
+        perror("Shared memory attach failed");
         return 1;
     }
 
-    listen(server_socket, 5);
-    std::cout << "Server is listening..." << std::endl;
+    std::cout << "Server is waiting for callback registration..." << std::endl;
 
-    int client_socket = accept(server_socket, nullptr, nullptr);
-    if (client_socket < 0) {
-        perror("Accept failed");
+    // 等待回调函数名称
+    while (strlen(shared_memory) == 0) {
+        sleep(1); // 等待客户端注册回调
+    }
+
+    std::cout << "Received callback function name: " << shared_memory << std::endl;
+
+    // 动态加载回调函数
+    void* handle = dlopen("./libcallback.so", RTLD_LAZY);
+    if (!handle) {
+        std::cerr << "Failed to load library: " << dlerror() << std::endl;
         return 1;
     }
 
-    handle_client(client_socket);
+    // 使用函数名找到对应函数
+    void (*callback)() = (void (*)())dlsym(handle, shared_memory);
+    if (!callback) {
+        std::cerr << "Failed to find function: " << dlerror() << std::endl;
+        dlclose(handle);
+        return 1;
+    }
 
-    close(client_socket);
-    close(server_socket);
-    unlink(SOCKET_PATH);
+    // 调用回调函数
+    std::cout << "Calling the registered callback function..." << std::endl;
+    callback();
+
+    // 清理资源
+    dlclose(handle);
+    shmdt(shared_memory);
+    shmctl(shmid, IPC_RMID, nullptr);
+
     return 0;
 }

@@ -1,33 +1,35 @@
 #include <iostream>
-#include <sys/socket.h>
-#include <sys/un.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <cstring>
 #include <unistd.h>
 
-const char* SOCKET_PATH = "/tmp/callback_socket";
+const int SHM_SIZE = 256;
 
 int main() {
-    int client_socket = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (client_socket < 0) {
-        perror("Socket creation failed");
+    // 连接到共享内存
+    key_t key = ftok("shmfile", 65);
+    int shmid = shmget(key, SHM_SIZE, 0666 | IPC_CREAT);
+    if (shmid == -1) {
+        perror("Shared memory creation failed");
         return 1;
     }
 
-    struct sockaddr_un server_addr;
-    server_addr.sun_family = AF_UNIX;
-    strncpy(server_addr.sun_path, SOCKET_PATH, sizeof(server_addr.sun_path) - 1);
-
-    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Connect failed");
+    char* shared_memory = (char*)shmat(shmid, nullptr, 0);
+    if (shared_memory == (char*)-1) {
+        perror("Shared memory attach failed");
         return 1;
     }
 
-    std::string message = "Registering callback";
-    write(client_socket, message.c_str(), message.size());
+    // 将回调函数的名称写入共享内存
+    const char* callback_name = "my_callback_function";
+    strcpy(shared_memory, callback_name);
+    std::cout << "Registered callback function: " << callback_name << std::endl;
 
-    char buffer[256] = {0};
-    read(client_socket, buffer, sizeof(buffer));
-    std::cout << "Client received: " << buffer << std::endl;
+    // 等待 Server 执行
+    sleep(5);
 
-    close(client_socket);
+    // 清理资源
+    shmdt(shared_memory);
     return 0;
 }
